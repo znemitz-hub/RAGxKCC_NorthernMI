@@ -990,10 +990,35 @@ function collectState(){
   return { courseData, golferHandicaps, scores, stablefordTable, snakeData };
 }
 
+// Firebase doesn't store real arrays — it stores key/value pairs and guesses
+// whether a sparse structure should come back as an array or a plain object.
+// A mostly-empty 18-slot array (like one snake flag out of 18 holes) reliably
+// gets guessed wrong and returned as {"2":"jared"} instead of an array. Storing
+// the whole state as one JSON string sidesteps that guessing entirely, and this
+// normalizer repairs any already-corrupted data from before this fix.
+function normalizeArray18(value){
+  if(Array.isArray(value)){
+    const arr = value.slice(0,18);
+    while(arr.length < 18) arr.push(null);
+    return arr;
+  }
+  if(value && typeof value === 'object'){
+    const arr = new Array(18).fill(null);
+    Object.keys(value).forEach(k=>{
+      const idx = Number(k);
+      if(Number.isInteger(idx) && idx>=0 && idx<18) arr[idx] = value[k];
+    });
+    return arr;
+  }
+  return new Array(18).fill(null);
+}
+
 async function loadInitialState(){
   try{
     const snapshot = await withTimeout(tripRef.get(), PERSIST_TIMEOUT_MS);
-    return snapshot.exists() ? snapshot.val() : {};
+    if(!snapshot.exists()) return {};
+    const raw = snapshot.val();
+    return typeof raw === 'string' ? JSON.parse(raw) : raw; // string = new format, object = legacy pre-fix data
   }catch(e){
     console.error('initial load failed', e);
     return {};
@@ -1008,14 +1033,14 @@ function applyRemoteState(saved){
   if(saved.scores){
     Object.keys(saved.scores).forEach(rid=>{
       Object.keys(saved.scores[rid]).forEach(gid=>{
-        if(scores[rid] && scores[rid][gid]) scores[rid][gid] = saved.scores[rid][gid];
+        if(scores[rid] && scores[rid][gid]) scores[rid][gid] = normalizeArray18(saved.scores[rid][gid]);
       });
     });
   }
   if(saved.stablefordTable) stablefordTable = saved.stablefordTable;
   if(saved.snakeData){
     Object.keys(saved.snakeData).forEach(rid=>{
-      if(snakeData[rid]) snakeData[rid] = saved.snakeData[rid];
+      if(snakeData[rid]) snakeData[rid] = normalizeArray18(saved.snakeData[rid]);
     });
   }
 }
@@ -1028,7 +1053,8 @@ tripRef.on('value', (snapshot) => {
     suppressNextRemoteRender = false;
     return;
   }
-  applyRemoteState(snapshot.val());
+  const raw = snapshot.val();
+  applyRemoteState(typeof raw === 'string' ? JSON.parse(raw) : raw);
   renderAll();
 });
 
@@ -1072,7 +1098,7 @@ async function doPublish(){
   let failed = false;
   try{
     suppressNextRemoteRender = true;
-    await withTimeout(tripRef.set(collectState()), PERSIST_TIMEOUT_MS);
+    await withTimeout(tripRef.set(JSON.stringify(collectState())), PERSIST_TIMEOUT_MS);
   }catch(e){
     console.error('save failed or timed out', e);
     suppressNextRemoteRender = false;
